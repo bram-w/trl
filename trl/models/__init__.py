@@ -31,4 +31,5 @@ if is_diffusers_available():
         DDPOSchedulerOutput,
         DDPOStableDiffusionPipeline,
         DefaultDDPOStableDiffusionPipeline,
+        DefaultDiffusionDPOStableDiffusionPipeline,
     )

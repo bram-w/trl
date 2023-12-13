@@ -1,0 +1,6 @@
+SDXL
+copyright
+make sure doing prompt dropout
+image validation logging
+Ai feedback
+Check multi-gpu works as expected (syncehed model weights, etc)

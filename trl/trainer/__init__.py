@@ -30,10 +30,12 @@ from .utils import (
 from ..import_utils import is_diffusers_available
 from .base import BaseTrainer
 from .ddpo_config import DDPOConfig
+from .diffusion_dpo_config import DiffusionDPOConfig
 
 
 if is_diffusers_available():
     from .ddpo_trainer import DDPOTrainer
+    from .diffusion_dpo_trainer import DiffusionDPOTrainer
 
 from .dpo_trainer import DPOTrainer
 from .iterative_sft_trainer import IterativeSFTTrainer

@@ -643,3 +643,20 @@ class DefaultDDPOStableDiffusionPipeline(DDPOStableDiffusionPipeline):
             del load_model
         else:
             raise ValueError(f"Unknown model type {type(models[0])}")
+            
+            
+            
+class DefaultDiffusionDPOStableDiffusionPipeline(DefaultDDPOStableDiffusionPipeline):
+    # change init (reference unet, also need to do sdxl
+    def __init__(self,
+                 pretrained_model_name: str,
+                 *,
+                 pretrained_model_revision: str = "main",
+                 use_lora: bool = False):
+        # decided not to put ref_unet here to ease saving complications
+        DefaultDDPOStableDiffusionPipeline.__init__(self,
+                                                    pretrained_model_name,
+                                                    pretrained_model_revision=pretrained_model_revision,
+                                                    use_lora=use_lora)
+        
+        
