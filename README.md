@@ -1,3 +1,55 @@
+Notes from Bram:
+
+Run 
+```
+bash install.sh
+bash observe_failure.sh <hf-token>
+```
+
+Initially will be fine:
+```
+Batch index 0
+keeping unet in eval mode for now
+Using .unet as .ref_unet to isolate behavior
+Confirmed that ref_unet has not changed pre-backwards
+Confirmed that ref_unet has not changed post-backwards
+Batch index 1
+keeping unet in eval mode for now
+Using .unet as .ref_unet to isolate behavior
+Confirmed that ref_unet has not changed pre-backwards
+Confirmed that ref_unet has not changed post-backwards
+Batch index 2
+keeping unet in eval mode for now
+Using .unet as .ref_unet to isolate behavior
+Confirmed that ref_unet has not changed pre-backwards
+Confirmed that ref_unet has not changed post-backwards
+```
+And eventually will get
+```
+Batch index 45
+keeping unet in eval mode for now
+Using .unet as .ref_unet to isolate behavior
+Confirmed that ref_unet has not changed pre-backwards
+Confirmed that ref_unet has not changed post-backwards
+Batch index 46
+keeping unet in eval mode for now
+Using .unet as .ref_unet to isolate behavior
+Confirmed that ref_unet has not changed pre-backwards
+Key changed:  up_blocks.3.attentions.0.proj_out.weight
+Tensor hash (abs-sum) before and after  6940.78759765625 6859.3955078125
+ref_unet changed after backwards
+```
+
+Observations: this happens if
+- if all unets are in eval()
+- the reference unet is not used in any computation
+- after a seemingly unpredictable # of steps (have seen 2-100+)
+- in both half and full prec.
+- w/o any optimizer stepping
+- w/ both accelerator.backward(loss) or loss.backward()
+
+---
+
 <div style="text-align: center">
 <img src="https://huggingface.co/datasets/trl-internal-testing/example-images/resolve/main/images/trl_banner_dark.png">
 </div>
