@@ -1,6 +1,7 @@
-SDXL
-copyright
+Get multi-gpu working
+Fix Nan
 make sure doing prompt dropout
-image validation logging
-Ai feedback
-Check multi-gpu works as expected (syncehed model weights, etc)
+
+SDXL
+
+Image validation logging

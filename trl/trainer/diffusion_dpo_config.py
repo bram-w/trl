@@ -39,9 +39,9 @@ class DiffusionDPOConfig:
     """Number of steps between saving model checkpoints."""
     num_checkpoint_limit: int = 5
     """Number of checkpoints to keep before overwriting old ones."""
-    mixed_precision: str = "fp16"
+    mixed_precision: str = "no"
     """Mixed precision training."""
-    allow_tf32: bool = True
+    allow_tf32: bool = False
     """Allow tf32 on Ampere GPUs."""
     resume_from: Optional[str] = ""
     """Resume training from a checkpoint."""
@@ -95,6 +95,12 @@ class DiffusionDPOConfig:
     """Maximum number of samples to train on (randomly sampled)"""
     dataloader_num_workers: int = 16
     """Number of dataloader workers"""
+    resolution: int = 16
+    """Image resolution"""
+    random_crop: bool = False
+    """Random vs center cropping"""
+    no_hflip: bool = False
+    """Hflip or not"""
 
     def to_dict(self):
         output_dict = {}

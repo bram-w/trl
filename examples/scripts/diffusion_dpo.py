@@ -40,7 +40,7 @@ class ScriptArguments:
 
     diffusion_dpo_config: DiffusionDPOConfig = field(
         default_factory=lambda: DiffusionDPOConfig(
-            train_gradient_accumulation_steps=1,
+            train_gradient_accumulation_steps=128,
             tracker_project_name="stable_diffusion_training",
             dataset_cache_dir="/export/share/datasets/vision_language/pick_a_pic_v2/",
             log_with="tensorboard",
@@ -75,18 +75,12 @@ if __name__ == "__main__":
     args = tyro.cli(ScriptArguments)
 
     pipeline = DefaultDiffusionDPOStableDiffusionPipeline(
-        args.pretrained_model, pretrained_model_revision=args.pretrained_revision, use_lora=True
+        args.pretrained_model, pretrained_model_revision=args.pretrained_revision, use_lora=False
     )
-    
-    ref_unet = UNet2DConditionModel.from_pretrained(args.pretrained_model,
-                                                        subfolder="unet",
-                                           revision=args.pretrained_revision)
-    ref_unet.requires_grad_(False)
 
     trainer = DiffusionDPOTrainer(
         args.diffusion_dpo_config,
         pipeline,
-        ref_unet,
         image_samples_hook=None, # TODO
     )
 

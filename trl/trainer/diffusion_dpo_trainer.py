@@ -60,14 +60,14 @@ class DiffusionDPOTrainer(BaseTrainer):
         self,
         config: DiffusionDPOConfig,
         sd_pipeline: DefaultDiffusionDPOStableDiffusionPipeline,
-        ref_unet: UNet2DConditionModel,
         image_samples_hook: Optional[Callable[[Any, Any, Any], Any]] = None,
     ):
         if image_samples_hook is None:
             warn("No image_samples_hook provided; no images will be logged")
 
         self.config = config
-        self.ref_unet = ref_unet
+        print("Storing original ref_unet parameters")
+        self.orig_ref_unet_sd = sd_pipeline.ref_unet.state_dict()
         self.image_samples_callback = image_samples_hook
 
         accelerator_project_config = ProjectConfiguration(**self.config.project_kwargs)
@@ -138,7 +138,8 @@ class DiffusionDPOTrainer(BaseTrainer):
         self.sd_pipeline.vae.to(self.accelerator.device, dtype=inference_dtype)
         self.sd_pipeline.text_encoder.to(self.accelerator.device, dtype=inference_dtype)
         self.sd_pipeline.unet.to(self.accelerator.device, dtype=inference_dtype)
-        self.ref_unet.to(self.accelerator.device, dtype=inference_dtype)
+        self.sd_pipeline.ref_unet.to(self.accelerator.device, dtype=inference_dtype)
+        self.inference_dtype = inference_dtype
 
         trainable_layers = self.sd_pipeline.get_trainable_layers()
 
@@ -166,7 +167,7 @@ class DiffusionDPOTrainer(BaseTrainer):
             self.first_epoch = 0
             
             
-        self.dataloader = get_dataloader(config)
+        self.dataloader = self.get_dataloader(config)
         
         
 
@@ -189,11 +190,11 @@ class DiffusionDPOTrainer(BaseTrainer):
             global_step (int): The updated global step.
 
         """
-
+        print(batch_i)
         # if self.image_samples_callback is not None:
         #     self.image_samples_callback(prompt_image_data, global_step, self.accelerator.trackers[0])
-
-        self.sd_pipeline.unet.train()
+        print("keeping unet in eval mode for now")
+        self.sd_pipeline.unet.eval()
         global_step = self._train_batched_samples(batch, batch_i, global_step, info)
         # ensure optimization step at the end of the inner epoch
         if ((batch_i+1) % self.config.train_gradient_accumulation_steps == 0) and (not self.accelerator.sync_gradients):
@@ -202,7 +203,7 @@ class DiffusionDPOTrainer(BaseTrainer):
                 )
 
         if batch_i != 0 and \
-                batch_i % (self.config.train_gradient_accumlation_steps * self.config.save_freq) == 0 and \
+                batch_i % (self.config.train_gradient_accumulation_steps * self.config.save_freq) == 0 and \
                 self.accelerator.is_main_process:
             self.accelerator.save_state()
 
@@ -222,13 +223,14 @@ class DiffusionDPOTrainer(BaseTrainer):
             loss (torch.Tensor), 
             (all of these are of shape (1,))
         """
+        
         with torch.no_grad():
             # get text embeds
-            encoder_hidden_states = self.sd_pipeline.text_encoder(batch["input_ids"])[0].repeat(2, 1, 1)
+            encoder_hidden_states = self.sd_pipeline.text_encoder(input_ids.to(self.accelerator.device))[0].repeat(2, 1, 1)
             # split winning and losing pixel values
-            feed_pixel_values = torch.cat(batch["pixel_values"].chunk(2, dim=1))
+            feed_pixel_values = torch.cat(pixel_values.chunk(2, dim=1))
             # encode pixels to latents
-            latents = self.sd_pipeline.vae.encode(feed_pixel_values.to(inference_dtype)).latent_dist.sample()
+            latents = self.sd_pipeline.vae.encode(feed_pixel_values.to(self.inference_dtype).to(self.accelerator.device)).latent_dist.sample()
             latents = latents * self.sd_pipeline.vae.config.scaling_factor
             
         # copy noise for image pairs
@@ -239,7 +241,7 @@ class DiffusionDPOTrainer(BaseTrainer):
         timesteps = torch.randint(0, self.sd_pipeline.scheduler.config.num_train_timesteps, (bsz,),
                                   device=latents.device, dtype=torch.long).repeat(2)
         
-        noisy_latents = noise_scheduler.add_noise(latents,
+        noisy_latents = self.sd_pipeline.scheduler.add_noise(latents,
                                                   noise,
                                                   timesteps)
         target = noise
@@ -251,10 +253,10 @@ class DiffusionDPOTrainer(BaseTrainer):
                             # prompt_batch["prompt_embeds"] if args.sdxl else encoder_hidden_states)
         added_cond_kwargs = None  # unet_added_conditions if args.sdxl else None
 
-        model_pred = unet(
-                        *model_batch_args,
-                          added_cond_kwargs = added_cond_kwargs
-                         ).sample
+        model_pred = self.sd_pipeline.unet(
+                                *model_batch_args,
+                                  added_cond_kwargs = added_cond_kwargs
+                                 ).sample
 
         # model_pred and ref_pred will be (2 * LBS) x 4 x latent_spatial_dim x latent_spatial_dim
         # losses are both 2 * LBS
@@ -267,7 +269,8 @@ class DiffusionDPOTrainer(BaseTrainer):
         model_diff = model_losses_w - model_losses_l # These are both LBS (as is t)
 
         with torch.no_grad(): # Get the reference policy (unet) prediction
-            ref_pred = self.ref_unet(
+            print("Using .unet as .ref_unet to isolate behavior")
+            ref_pred = self.sd_pipeline.unet(
                             *model_batch_args,
                               added_cond_kwargs = added_cond_kwargs
                              ).sample.detach()
@@ -280,6 +283,7 @@ class DiffusionDPOTrainer(BaseTrainer):
         inside_term = scale_term * (model_diff - ref_diff)
         implicit_acc = (inside_term > 0).sum().float() / inside_term.size(0)
         loss = -1 * F.logsigmoid(inside_term).mean()        # loss should already be mean-reduced  
+    
         return loss, raw_model_loss, raw_ref_loss, implicit_acc
 
     def _setup_optimizer(self, trainable_layers_parameters):
@@ -332,24 +336,48 @@ class DiffusionDPOTrainer(BaseTrainer):
             global_step (int): The updated global step
         """
         with self.accelerator.accumulate(self.sd_pipeline.unet):
-            loss, raw_model_loss, raw_ref_loss,  = self.calculate_loss(
-                sample["pixel_values"],
-                sample["input_ids"], # change for sdxl
+            loss, raw_model_loss, raw_ref_loss, implicit_acc = self.calculate_loss(
+                batch["pixel_values"],
+                batch["input_ids"], # change for sdxl
             )
             info["loss"].append(loss)
             info["raw_model_loss"].append(raw_model_loss)
             info["raw_ref_loss"].append(raw_ref_loss)
             info["implicit_acc"].append(implicit_acc)
 
+            
+            # Pre-backwards all parameters match
+            ref_unet_sd = self.sd_pipeline.ref_unet.state_dict()
+            for k,p1 in self.orig_ref_unet_sd.items():
+                p2 = ref_unet_sd[k].to(p1.device)
+                if not (p1==p2).all().item():
+                    print(n1)
+                    print(abs(p1).sum(), abs(p2).sum())
+                    # print(p1- p2)
+                    print("ref_unet changed after backwards")
+                    sys.exit()
+            print("Confirmed that ref_unet has not changed pre-backwards")
+            
             self.accelerator.backward(loss)
-            if self.accelerator.sync_gradients:
+            # loss.backward() # same behavior
+            
+            for k,p1 in self.orig_ref_unet_sd.items():
+                p2 = ref_unet_sd[k].to(p1.device)
+                if not (p1==p2).all().item():
+                    print(n1)
+                    print(abs(p1).sum(), abs(p2).sum())
+                    # print(p1- p2)
+                    print("ref_unet changed after backwards")
+                    sys.exit()
+           
+            if self.accelerator.sync_gradients and not self.config.train_use_adafactor:
                 self.accelerator.clip_grad_norm_(
                     self.trainable_layers.parameters(),
                     self.config.train_max_grad_norm,
                 )
+            
             self.optimizer.step()
             self.optimizer.zero_grad()
-
         # Checks if the accelerator has performed an optimization step behind the scenes
         if self.accelerator.sync_gradients:
             # logging and maybe increment global step
@@ -357,7 +385,9 @@ class DiffusionDPOTrainer(BaseTrainer):
             info = self.accelerator.reduce(info, reduction="mean")
             self.accelerator.log(info, step=global_step)
             global_step += 1
+            print(info)
             info = defaultdict(list)
+      
         return global_step, info
 
   
@@ -367,9 +397,6 @@ class DiffusionDPOTrainer(BaseTrainer):
         Train the model for a given number of epochs
         """
         global_step = 0
-        if epochs is None:
-            epochs = self.config.num_epochs
-        global_step = 0
         info = defaultdict(list)
         for batch_i, batch in enumerate(self.dataloader):
             global_step, info = self.step(batch, batch_i, global_step, info)
@@ -377,81 +404,81 @@ class DiffusionDPOTrainer(BaseTrainer):
     def _save_pretrained(self, save_directory):
         self.sd_pipeline.save_pretrained(save_directory)
         
-def get_dataloader(config):
-    
-    dataset = load_dataset(
-                    config.dataset_name,
-                    None,
-                    cache_dir = config.dataset_cache_dir)
-    column_names = dataset['train'].column_names
-    
-    
-    def tokenize_captions(examples, is_train=True):
-        captions = []
-        for caption in examples['caption']:
-            if isinstance(caption, str):
-                captions.append(caption)
-            elif isinstance(caption, (list, np.ndarray)):
-                # take a random caption if there are multiple
-                captions.append(random.choice(caption) if is_train else caption[0])
-            else:
-                raise ValueError(
-                    f"Caption column `caption` should contain either strings or lists of strings."
-                )
-        inputs = self.sd_pipeline.tokenizer(
-            captions,
-            max_length=self.sd_pipeline.tokenizer.model_max_length,
-            padding="max_length",
-            truncation=True,
-            return_tensors="pt"
+    def get_dataloader(self, config):
+
+        dataset = load_dataset(
+                        config.dataset_name,
+                        None,
+                        cache_dir = config.dataset_cache_dir)
+        column_names = dataset['train'].column_names
+
+
+        def tokenize_captions(examples, is_train=True):
+            captions = []
+            for caption in examples['caption']:
+                if isinstance(caption, str):
+                    captions.append(caption)
+                elif isinstance(caption, (list, np.ndarray)):
+                    # take a random caption if there are multiple
+                    captions.append(random.choice(caption) if is_train else caption[0])
+                else:
+                    raise ValueError(
+                        f"Caption column `caption` should contain either strings or lists of strings."
+                    )
+            inputs = self.sd_pipeline.tokenizer(
+                captions,
+                max_length=self.sd_pipeline.tokenizer.model_max_length,
+                padding="max_length",
+                truncation=True,
+                return_tensors="pt"
+            )
+            return inputs.input_ids
+
+        train_transforms = transforms.Compose(
+            [
+                transforms.Resize(config.resolution,
+                                  interpolation=transforms.InterpolationMode.BILINEAR),
+                transforms.RandomCrop(config.resolution) if config.random_crop else transforms.CenterCrop(config.resolution),
+                transforms.Lambda(lambda x: x) if config.no_hflip else transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                transforms.Normalize([0.5], [0.5]),
+            ]
         )
-        return inputs.input_ids
-    
-    train_transforms = transforms.Compose(
-        [
-            transforms.Resize(args.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
-            transforms.RandomCrop(args.resolution) if args.random_crop else transforms.CenterCrop(args.resolution),
-            transforms.Lambda(lambda x: x) if args.no_hflip else transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize([0.5], [0.5]),
-        ]
-    )
 
-    def preprocess_train(examples):
-        all_pixel_values = []
-        for col_name in ['jpg_0', 'jpg_1']:
-            images = [Image.open(io.BytesIO(im_bytes)).convert("RGB")
-                        for im_bytes in examples[col_name]]
-            pixel_values = [train_transforms(image) for image in images]
-            all_pixel_values.append(pixel_values)
-        # Double on channel dim, jpg_y then jpg_w
-        im_tup_iterator = zip(*all_pixel_values)
-        combined_pixel_values = []
-        for im_tup, label_0 in zip(im_tup_iterator, examples['label_0']):
-            if label_0==0: 
-                im_tup = im_tup[::-1]
-            combined_im = torch.cat(im_tup, dim=0) # no batch dim
-            combined_pixel_values.append(combined_im)
-        examples["pixel_values"] = combined_pixel_values
-        # SDXL takes raw prompts
-        # if not args.sdxl: examples["input_ids"] = tokenize_captions(examples)
-        examples["input_ids"] = tokenize_captions(examples)
-        return examples
+        def preprocess_train(examples):
+            all_pixel_values = []
+            for col_name in ['jpg_0', 'jpg_1']:
+                images = [Image.open(io.BytesIO(im_bytes)).convert("RGB")
+                            for im_bytes in examples[col_name]]
+                pixel_values = [train_transforms(image) for image in images]
+                all_pixel_values.append(pixel_values)
+            # Double on channel dim, jpg_y then jpg_w
+            im_tup_iterator = zip(*all_pixel_values)
+            combined_pixel_values = []
+            for im_tup, label_0 in zip(im_tup_iterator, examples['label_0']):
+                if label_0==0: 
+                    im_tup = im_tup[::-1]
+                combined_im = torch.cat(im_tup, dim=0) # no batch dim
+                combined_pixel_values.append(combined_im)
+            examples["pixel_values"] = combined_pixel_values
+            # SDXL takes raw prompts
+            # if not args.sdxl: examples["input_ids"] = tokenize_captions(examples)
+            examples["input_ids"] = tokenize_captions(examples)
+            return examples
 
-    def collate_fn(examples):
-        pixel_values = torch.stack([example["pixel_values"] for example in examples])
-        pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
-        return_d =  {"pixel_values": pixel_values}
-        # SDXL takes raw prompts
-        if False: # args.sdxl:
-            return_d["caption"] = [example["caption"] for example in examples]
-        else:
-            return_d["input_ids"] = torch.stack([example["input_ids"] for example in examples])
+        def collate_fn(examples):
+            pixel_values = torch.stack([example["pixel_values"] for example in examples])
+            pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
+            return_d =  {"pixel_values": pixel_values}
+            # SDXL takes raw prompts
+            if False: # args.sdxl:
+                return_d["caption"] = [example["caption"] for example in examples]
+            else:
+                return_d["input_ids"] = torch.stack([example["input_ids"] for example in examples])
 
-        return return_d
+            return return_d
 
-    ### DATASET #####
-    with accelerator.main_process_first():
+        ### DATASET #####
         if 'pickapic' in config.dataset_name:
             # eliminate no-decisions (0.5-0.5 labels)
             orig_len = dataset['train'].num_rows
@@ -460,21 +487,21 @@ def get_dataloader(config):
             dataset['train'] = dataset['train'].select(not_split_idx)
             new_len = dataset['train'].num_rows
             print(f"Eliminated {orig_len - new_len}/{orig_len} split decisions for Pick-a-pic")
-            
-                
-        if args.max_train_samples is not None:
+
+
+        if config.max_train_samples:
             dataset['train'] = dataset['train'].shuffle(seed=config.seed).select(range(config.max_train_samples))
         # Set the training transforms
         train_dataset = dataset['train'].with_transform(preprocess_train)
 
-    # DataLoaders creation:
-    train_dataloader = torch.utils.data.DataLoader(
-        train_dataset,
-        shuffle=True,
-        collate_fn=collate_fn,
-        batch_size=config.train_batch_size,
-        num_workers=config.dataloader_num_workers,
-        drop_last=True
-    )
-    
-    return train_dataloader
+        # DataLoaders creation:
+        train_dataloader = torch.utils.data.DataLoader(
+            train_dataset,
+            shuffle=True,
+            collate_fn=collate_fn,
+            batch_size=config.train_batch_size,
+            num_workers=config.dataloader_num_workers,
+            drop_last=True
+        )
+
+        return train_dataloader
