@@ -17,6 +17,7 @@ from collections import defaultdict
 from concurrent import futures
 import io
 from PIL import Image
+import sys
 from typing import Any, Callable, Optional, Tuple
 from warnings import warn
 
@@ -190,7 +191,7 @@ class DiffusionDPOTrainer(BaseTrainer):
             global_step (int): The updated global step.
 
         """
-        print(batch_i)
+        print("Batch index", batch_i)
         # if self.image_samples_callback is not None:
         #     self.image_samples_callback(prompt_image_data, global_step, self.accelerator.trackers[0])
         print("keeping unet in eval mode for now")
@@ -351,10 +352,10 @@ class DiffusionDPOTrainer(BaseTrainer):
             for k,p1 in self.orig_ref_unet_sd.items():
                 p2 = ref_unet_sd[k].to(p1.device)
                 if not (p1==p2).all().item():
-                    print(n1)
-                    print(abs(p1).sum(), abs(p2).sum())
+                    print("Key changed: ", k)
+                    print("Tensor hash (abs-sum) before and after ", abs(p1).sum().item(), abs(p2).sum().item())
                     # print(p1- p2)
-                    print("ref_unet changed after backwards")
+                    print( "ref_unet changed after backwards")
                     sys.exit()
             print("Confirmed that ref_unet has not changed pre-backwards")
             
@@ -364,11 +365,12 @@ class DiffusionDPOTrainer(BaseTrainer):
             for k,p1 in self.orig_ref_unet_sd.items():
                 p2 = ref_unet_sd[k].to(p1.device)
                 if not (p1==p2).all().item():
-                    print(n1)
-                    print(abs(p1).sum(), abs(p2).sum())
+                    print("Key changed: ", k)
+                    print("Tensor hash (abs-sum) before and after ", abs(p1).sum().item(), abs(p2).sum().item())
                     # print(p1- p2)
-                    print("ref_unet changed after backwards")
+                    print( "ref_unet changed after backwards\nEXITING\n")
                     sys.exit()
+            print("Confirmed that ref_unet has not changed post-backwards")
            
             if self.accelerator.sync_gradients and not self.config.train_use_adafactor:
                 self.accelerator.clip_grad_norm_(
