@@ -13,19 +13,11 @@
 # limitations under the License.
 
 
-import os
 from dataclasses import dataclass, field
 
-import numpy as np
-import torch
-import torch.nn as nn
 import tyro
-from diffusers import UNet2DConditionModel
-from huggingface_hub import hf_hub_download
-from huggingface_hub.utils import EntryNotFoundError
 
-from trl import DiffusionDPOConfig, DiffusionDPOTrainer, DefaultDiffusionDPOStableDiffusionPipeline
-from trl.import_utils import is_xpu_available
+from trl import DefaultDiffusionDPOStableDiffusionPipeline, DiffusionDPOConfig, DiffusionDPOTrainer
 
 
 @dataclass
@@ -81,7 +73,7 @@ if __name__ == "__main__":
     trainer = DiffusionDPOTrainer(
         args.diffusion_dpo_config,
         pipeline,
-        image_samples_hook=None, # TODO
+        image_samples_hook=None,  # TODO
     )
 
     trainer.train()

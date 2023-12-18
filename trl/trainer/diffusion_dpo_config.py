@@ -71,7 +71,7 @@ class DiffusionDPOConfig:
     """Adam weight decay."""
     train_adam_epsilon: float = 1e-8
     """Adam epsilon."""
-    train_gradient_accumulation_steps: int = 16 # 128 in orig paper
+    train_gradient_accumulation_steps: int = 16  # 128 in orig paper
     """Number of gradient accumulation steps."""
     train_max_grad_norm: float = 1.0
     """Maximum gradient norm for gradient clipping."""
@@ -81,8 +81,7 @@ class DiffusionDPOConfig:
     """The fraction of timesteps to train on."""
     negative_prompts: Optional[str] = ""
     """Comma-separated list of prompts to use as negative examples."""
-    
-    
+
     proportion_empty_prompts: float = 0.2
     """The fraction of prompts to be null"""
     beta_dpo: float = 5000
