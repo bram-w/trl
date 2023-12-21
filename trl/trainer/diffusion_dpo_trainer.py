@@ -17,6 +17,7 @@ import os
 import random
 import sys
 from collections import defaultdict
+import time
 from typing import Any, Callable, Optional
 from warnings import warn
 
@@ -136,10 +137,12 @@ class DiffusionDPOTrainer(BaseTrainer):
         else:
             inference_dtype = torch.float32
 
+            
+        # when ref_unet was at the end it's parameters were getting changed
+        self.sd_pipeline.ref_unet.to(self.accelerator.device, dtype=inference_dtype)
         self.sd_pipeline.vae.to(self.accelerator.device, dtype=inference_dtype)
         self.sd_pipeline.text_encoder.to(self.accelerator.device, dtype=inference_dtype)
         self.sd_pipeline.unet.to(self.accelerator.device, dtype=inference_dtype)
-        self.sd_pipeline.ref_unet.to(self.accelerator.device, dtype=inference_dtype)
         self.inference_dtype = inference_dtype
 
         trainable_layers = self.sd_pipeline.get_trainable_layers()
@@ -344,30 +347,51 @@ class DiffusionDPOTrainer(BaseTrainer):
             info["implicit_acc"].append(implicit_acc)
 
             # Pre-backwards all parameters match
+            # ref_unet_sd = self.sd_pipeline.ref_unet.state_dict()
+            print("using direct access to ref_unet")
             ref_unet_sd = self.sd_pipeline.ref_unet.state_dict()
+            
+            exit_flag = False
+            
             for k, p1 in self.orig_ref_unet_sd.items():
                 p2 = ref_unet_sd[k].to(p1.device)
                 if not (p1 == p2).all().item():
                     print("Key changed: ", k)
                     print("Tensor hash (abs-sum) before and after ", abs(p1).sum().item(), abs(p2).sum().item())
                     # print(p1- p2)
-                    print("ref_unet changed after backwards")
-                    sys.exit()
+                    exit_flag = True
+            if exit_flag:
+                print("ref_unet changed before backwards")
+                sys.exit()
             print("Confirmed that ref_unet has not changed pre-backwards")
 
             self.accelerator.backward(loss)
             # loss.backward() # same behavior
-
+            
+            exit_flag = False
+            start_check_time = time.time()
             for k, p1 in self.orig_ref_unet_sd.items():
                 p2 = ref_unet_sd[k].to(p1.device)
+                
+                eval_str = f"self.sd_pipeline.ref_unet.{k}.requires_grad"
+                for i in list(range(100))[::-1]:
+                    eval_str = eval_str.replace(f".{i}", f"[{i}]")
+                # print(eval_str)
+                assert not eval(eval_str)
                 if not (p1 == p2).all().item():
                     print("Key changed: ", k)
                     print("Tensor hash (abs-sum) before and after ", abs(p1).sum().item(), abs(p2).sum().item())
                     # print(p1- p2)
-                    print("ref_unet changed after backwards\nEXITING\n")
-                    sys.exit()
-            print("Confirmed that ref_unet has not changed post-backwards")
-
+                    exit_flag = True
+            if exit_flag:
+                print("ref_unet changed after backwards")
+                print("reloading weights")
+                start_reloading_time = time.time()
+                self.sd_pipeline.ref_unet.load_state_dict(self.orig_ref_unet_sd)
+                print(f"Reloading took {time.time() - start_reloading_time}s")
+                sys.exit()
+            print(f"Confirmed that ref_unet has not changed post-backwards. Check took: {time.time() - start_check_time}s")
+            
             if self.accelerator.sync_gradients and not self.config.train_use_adafactor:
                 self.accelerator.clip_grad_norm_(
                     self.trainable_layers.parameters(),
