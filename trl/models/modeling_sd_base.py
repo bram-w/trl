@@ -530,17 +530,6 @@ class DefaultDDPOStableDiffusionPipeline(DDPOStableDiffusionPipeline):
             pretrained_model_name, revision=pretrained_model_revision
         )
         
-        if create_ref:
-#             second_pipeline = StableDiffusionPipeline.from_pretrained(
-#                 pretrained_model_name, revision=pretrained_model_revision
-#             )
-#             self.ref_unet = second_pipeline.unet
-        
-            self.ref_unet = UNet2DConditionModel.from_pretrained(
-                pretrained_model_name, revision=pretrained_model_revision, subfolder="unet"
-            )
-            self.ref_unet.requires_grad_(False)
-
         self.use_lora = use_lora
         self.pretrained_model = pretrained_model_name
         self.pretrained_revision = pretrained_model_revision
@@ -659,26 +648,13 @@ class DefaultDDPOStableDiffusionPipeline(DDPOStableDiffusionPipeline):
 import copy
 
 class DefaultDiffusionDPOStableDiffusionPipeline(DefaultDDPOStableDiffusionPipeline):
-    # change init (reference unet, also need to do sdxl
     def __init__(self, pretrained_model_name: str, *, pretrained_model_revision: str = "main", use_lora: bool = False):
-        # decided not to put ref_unet here to ease saving complications
-        
         DefaultDDPOStableDiffusionPipeline.__init__(
             self, pretrained_model_name, pretrained_model_revision=pretrained_model_revision, use_lora=use_lora,
                 create_ref=True
         )
 
-        
-        
-#         self.ref_unet = UNet2DConditionModel.from_pretrained(
-#             pretrained_model_name, revision=pretrained_model_revision, subfolder="unet"
-#         )
-# #         self.ref_unet = UNet2DConditionModel.from_pretrained(
-# #             pretrained_model_name, revision=pretrained_model_revision, subfolder="unet"
-# #         )
-#         # self._ref_unet = copy.deepcopy(self.sd_pipeline.unet)
-# #         self._ref_unet.requires_grad_(False)
-
-#     @property
-#     def ref_unet(self):
-#         return self.ref_unet
+        self.ref_unet = UNet2DConditionModel.from_pretrained(
+            pretrained_model_name, revision=pretrained_model_revision, subfolder="unet"
+        )
+        self.ref_unet.requires_grad_(False)
