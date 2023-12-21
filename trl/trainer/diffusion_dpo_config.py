@@ -35,7 +35,7 @@ class DiffusionDPOConfig:
     """Top-level logging directory for checkpoint saving."""
 
     # hyperparameters
-    save_freq: int = 200
+    save_freq: int = 3
     """Number of steps between saving model checkpoints."""
     num_checkpoint_limit: int = 5
     """Number of checkpoints to keep before overwriting old ones."""
