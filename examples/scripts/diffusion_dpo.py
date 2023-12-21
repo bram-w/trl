@@ -32,7 +32,6 @@ class ScriptArguments:
 
     diffusion_dpo_config: DiffusionDPOConfig = field(
         default_factory=lambda: DiffusionDPOConfig(
-            train_gradient_accumulation_steps=128,
             tracker_project_name="stable_diffusion_training",
             dataset_cache_dir="/export/share/datasets/vision_language/pick_a_pic_v2/",
             log_with="tensorboard",
