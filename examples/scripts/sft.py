@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import List, Optional
 
 import torch
 from accelerate import Accelerator
@@ -40,7 +40,7 @@ class ScriptArguments:
         default="timdettmers/openassistant-guanaco", metadata={"help": "the dataset name"}
     )
     dataset_text_field: Optional[str] = field(default="text", metadata={"help": "the text field of the dataset"})
-    log_with: Optional[str] = field(default="none", metadata={"help": "use 'wandb' to log with wandb"})
+    report_to: Optional[str] = field(default="none", metadata={"help": "use 'wandb' to log with wandb"})
     learning_rate: Optional[float] = field(default=1.41e-5, metadata={"help": "the learning rate"})
     batch_size: Optional[int] = field(default=64, metadata={"help": "the batch size"})
     seq_length: Optional[int] = field(default=512, metadata={"help": "Input sequence length"})
@@ -73,6 +73,8 @@ class ScriptArguments:
         },
     )
     hub_model_id: Optional[str] = field(default=None, metadata={"help": "The name of the model on HF Hub"})
+    mixed_precision: Optional[str] = field(default="bf16", metadata={"help": "Mixed precision training"})
+    target_modules: Optional[List[str]] = field(default=None, metadata={"help": "Target modules for LoRA adapters"})
 
 
 parser = HfArgumentParser(ScriptArguments)
@@ -118,7 +120,7 @@ training_args = TrainingArguments(
     logging_steps=script_args.logging_steps,
     num_train_epochs=script_args.num_train_epochs,
     max_steps=script_args.max_steps,
-    report_to=script_args.log_with,
+    report_to=script_args.report_to,
     save_steps=script_args.save_steps,
     save_total_limit=script_args.save_total_limit,
     push_to_hub=script_args.push_to_hub,
@@ -135,6 +137,7 @@ if script_args.use_peft:
         lora_alpha=script_args.peft_lora_alpha,
         bias="none",
         task_type="CAUSAL_LM",
+        target_modules=script_args.target_modules,
     )
 else:
     peft_config = None
