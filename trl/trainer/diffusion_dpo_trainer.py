@@ -26,6 +26,8 @@ from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
 from datasets import load_dataset
+from diffusers.optimization import get_scheduler
+
 from PIL import Image
 from torch.nn import functional as F
 from torchvision import transforms
@@ -134,13 +136,9 @@ class DiffusionDPOTrainer(BaseTrainer):
         else:
             inference_dtype = torch.float32
 
+        self.dataloader = self.get_dataloader(config)
             
-        # when ref_unet was at the end it's parameters were getting changed
-        self.sd_pipeline.ref_unet.to(self.accelerator.device, dtype=inference_dtype)
-        self.sd_pipeline.vae.to(self.accelerator.device, dtype=inference_dtype)
-        self.sd_pipeline.text_encoder.to(self.accelerator.device, dtype=inference_dtype)
-        self.sd_pipeline.unet.to(self.accelerator.device, dtype=inference_dtype)
-        self.inference_dtype = inference_dtype
+     
 
         trainable_layers = self.sd_pipeline.get_trainable_layers()
 
@@ -153,12 +151,14 @@ class DiffusionDPOTrainer(BaseTrainer):
             torch.backends.cuda.matmul.allow_tf32 = True
 
         self.optimizer = self._setup_optimizer(trainable_layers.parameters())
+        self.lr_scheduler = self._setup_lr_scheduler(self.optimizer)
 
         # NOTE from DDPO: for some reason, autocast is necessary for non-lora training but for lora training it isn't necessary and it uses
         # more memory
         self.autocast = self.sd_pipeline.autocast or self.accelerator.autocast
 
-        self.trainable_layers, self.optimizer = self.accelerator.prepare(trainable_layers, self.optimizer)
+        self.trainable_layers, self.optimizer, self.dataloader, self.lr_scheduler = self.accelerator.prepare(trainable_layers, self.optimizer, self.dataloader, self.lr_scheduler)
+
 
         if config.resume_from:
             logger.info(f"Resuming from {config.resume_from}")
@@ -166,8 +166,16 @@ class DiffusionDPOTrainer(BaseTrainer):
             self.first_epoch = int(config.resume_from.split("_")[-1]) + 1
         else:
             self.first_epoch = 0
-
-        self.dataloader = self.get_dataloader(config)
+            
+            
+       # when ref_unet was at the end it's parameters were getting changed
+#         self.sd_pipeline.ref_unet.to(self.accelerator.device, dtype=inference_dtype)
+#         self.sd_pipeline.vae.to(self.accelerator.device, dtype=inference_dtype)
+#         self.sd_pipeline.text_encoder.to(self.accelerator.device, dtype=inference_dtype)
+#         self.sd_pipeline.unet.to(self.accelerator.device, dtype=inference_dtype)
+        self.sd_pipeline.ref_unet, self.sd_pipeline.sd_pipeline.vae, self.sd_pipeline.sd_pipeline.text_encoder, self.sd_pipeline.sd_pipeline.unet = self.accelerator.prepare(self.sd_pipeline.ref_unet, self.sd_pipeline.sd_pipeline.vae, self.sd_pipeline.sd_pipeline.text_encoder, self.sd_pipeline.sd_pipeline.unet)
+        self.inference_dtype = inference_dtype
+    
 
     def step(self, batch: dict, batch_i: int, global_step: int, info: dict):
         """
@@ -188,8 +196,7 @@ class DiffusionDPOTrainer(BaseTrainer):
             global_step (int): The updated global step.
 
         """
-        if self.accelerator.is_main_process:
-            print("Batch index", batch_i)
+        
         # if self.image_samples_callback is not None:
         #     self.image_samples_callback(prompt_image_data, global_step, self.accelerator.trackers[0])
         self.sd_pipeline.unet.train()
@@ -258,10 +265,13 @@ class DiffusionDPOTrainer(BaseTrainer):
 
         model_pred = self.sd_pipeline.unet(*model_batch_args, added_cond_kwargs=added_cond_kwargs).sample
 
+        
         # model_pred and ref_pred will be (2 * LBS) x 4 x latent_spatial_dim x latent_spatial_dim
         # losses are both 2 * LBS
         # 1st half of tensors is preferred (y_w), second half is unpreferred
         model_losses = (model_pred - target).pow(2).mean(dim=[1, 2, 3])
+        
+        
         model_losses_w, model_losses_l = model_losses.chunk(2)
         # below for logging purposes
         raw_model_loss = 0.5 * (model_losses_w.mean() + model_losses_l.mean())
@@ -277,8 +287,14 @@ class DiffusionDPOTrainer(BaseTrainer):
 
         scale_term = -0.5 * self.config.beta_dpo
         inside_term = scale_term * (model_diff - ref_diff)
+        
         implicit_acc = (inside_term > 0).sum().float() / inside_term.size(0)
+        implicit_acc += 0.5 * (inside_term == 0).sum().float() / inside_term.size(0)
+
+        print("Not returning real loss")
         loss = -1 * F.logsigmoid(inside_term).mean()  # loss should already be mean-reduced
+        
+        # print(inside_term.item(), loss.item())
 
         return loss, raw_model_loss, raw_ref_loss, implicit_acc
 
@@ -306,6 +322,16 @@ class DiffusionDPOTrainer(BaseTrainer):
             weight_decay=self.config.train_adam_weight_decay,
             eps=self.config.train_adam_epsilon,
         )
+    
+    def _setup_lr_scheduler(self, optimizer):
+
+        lr_scheduler = get_scheduler(
+            self.config.lr_scheduler,
+            optimizer=optimizer,
+            num_warmup_steps=self.config.lr_warmup_steps * self.accelerator.num_processes,
+            num_training_steps=self.config.num_training_steps * self.accelerator.num_processes,
+        )
+        return lr_scheduler
 
     def _save_model_hook(self, models, weights, output_dir):
         self.sd_pipeline.save_checkpoint(models, weights, output_dir)
@@ -337,12 +363,22 @@ class DiffusionDPOTrainer(BaseTrainer):
                 batch["pixel_values"],
                 batch["input_ids"],  # change for sdxl
             )
+            # print('(a)', loss.item())
+            
             info["loss"].append(loss)
             info["raw_model_loss"].append(raw_model_loss)
             info["raw_ref_loss"].append(raw_ref_loss)
             info["implicit_acc"].append(implicit_acc)
 
+            orig_loss = loss.item()
             self.accelerator.backward(loss)
+            # loss.backward()
+            # print('(b)', loss.item())
+            
+            new_loss = loss.item()
+            if orig_loss != new_loss:
+                print("(B) loss not equal expected. Before: ", orig_loss, "After: ", new_loss)
+                sys.exit()
             
             if self.accelerator.sync_gradients and not self.config.train_use_adafactor:
                 self.accelerator.clip_grad_norm_(
@@ -351,16 +387,25 @@ class DiffusionDPOTrainer(BaseTrainer):
                 )
 
             self.optimizer.step()
+            self.lr_scheduler.step()
             self.optimizer.zero_grad()
         # Checks if the accelerator has performed an optimization step behind the scenes
+        
+        # print(info)
+        
         if self.accelerator.sync_gradients:
             # logging and maybe increment global step
             info = {k: torch.mean(torch.stack(v)) for k, v in info.items()}
             info = self.accelerator.reduce(info, reduction="mean")
-            self.accelerator.log(info, step=global_step)
+            
+            if self.accelerator.is_main_process:
+                self.accelerator.log(info, step=global_step)
+                print(f"Global Step: {global_step}")
+                print(self.config.beta_dpo, self.optimizer)
+                print({k:v.item() for k,v in info.items()})
             global_step += 1
-            print(info)
             info = defaultdict(list)
+            sys.exit()
 
         return global_step, info
 

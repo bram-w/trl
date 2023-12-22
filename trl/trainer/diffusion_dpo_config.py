@@ -35,7 +35,7 @@ class DiffusionDPOConfig:
     """Top-level logging directory for checkpoint saving."""
 
     # hyperparameters
-    save_freq: int = 3
+    save_freq: int = 500
     """Number of steps between saving model checkpoints."""
     num_checkpoint_limit: int = 5
     """Number of checkpoints to keep before overwriting old ones."""
@@ -61,7 +61,7 @@ class DiffusionDPOConfig:
     """Whether to use the 8bit Adam optimizer from bitsandbytes."""
     train_use_adafactor: bool = False
     """Whether to use the Adafactor for training (saves memory)"""
-    train_learning_rate: float = 2.5e-6
+    train_learning_rate: float = 2.5e-5
     """Learning rate."""
     train_adam_beta1: float = 0.9
     """Adam beta1."""
@@ -71,7 +71,7 @@ class DiffusionDPOConfig:
     """Adam weight decay."""
     train_adam_epsilon: float = 1e-8
     """Adam epsilon."""
-    train_gradient_accumulation_steps: int = 16  # 128 in orig paper
+    train_gradient_accumulation_steps: int = 128  # 128 in orig paper
     """Number of gradient accumulation steps."""
     train_max_grad_norm: float = 1.0
     """Maximum gradient norm for gradient clipping."""
@@ -100,6 +100,11 @@ class DiffusionDPOConfig:
     """Random vs center cropping"""
     no_hflip: bool = False
     """Hflip or not"""
+    lr_scheduler: str = "constant_with_warmup"
+    """Learning rate scheduler"""
+    lr_warmup_steps: int = 500
+    """Num LR warm-up steps"""
+    
 
     def to_dict(self):
         output_dict = {}

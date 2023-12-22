@@ -1,7 +1,5 @@
-Get multi-gpu working
-Fix Nan
+Now loss is changing as part of backward
+
 make sure doing prompt dropout
 
 SDXL
-
-Image validation logging
