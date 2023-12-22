@@ -22,6 +22,7 @@ from warnings import warn
 
 import numpy as np
 import torch
+from torch.cuda.amp import GradScaler
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
@@ -63,6 +64,7 @@ class DiffusionDPOTrainer(BaseTrainer):
         sd_pipeline: DefaultDiffusionDPOStableDiffusionPipeline,
         image_samples_hook: Optional[Callable[[Any, Any, Any], Any]] = None,
     ):
+        
         if image_samples_hook is None:
             warn("No image_samples_hook provided; no images will be logged")
 
@@ -95,9 +97,6 @@ class DiffusionDPOTrainer(BaseTrainer):
             log_with=self.config.log_with,
             mixed_precision=self.config.mixed_precision,
             project_config=accelerator_project_config,
-            # we always accumulate gradients across timesteps; we want config.train.gradient_accumulation_steps to be the
-            # number of *samples* we accumulate across, so we need to multiply by the number of training timesteps to get
-            # the total number of optimizer steps to accumulate across.
             gradient_accumulation_steps=self.config.train_gradient_accumulation_steps,
             **self.config.accelerator_kwargs,
         )
@@ -139,6 +138,7 @@ class DiffusionDPOTrainer(BaseTrainer):
         self.dataloader = self.get_dataloader(config)
             
      
+     
 
         trainable_layers = self.sd_pipeline.get_trainable_layers()
 
@@ -159,7 +159,6 @@ class DiffusionDPOTrainer(BaseTrainer):
 
         self.trainable_layers, self.optimizer, self.dataloader, self.lr_scheduler = self.accelerator.prepare(trainable_layers, self.optimizer, self.dataloader, self.lr_scheduler)
 
-
         if config.resume_from:
             logger.info(f"Resuming from {config.resume_from}")
             self.accelerator.load_state(config.resume_from)
@@ -169,12 +168,13 @@ class DiffusionDPOTrainer(BaseTrainer):
             
             
        # when ref_unet was at the end it's parameters were getting changed
-#         self.sd_pipeline.ref_unet.to(self.accelerator.device, dtype=inference_dtype)
-#         self.sd_pipeline.vae.to(self.accelerator.device, dtype=inference_dtype)
-#         self.sd_pipeline.text_encoder.to(self.accelerator.device, dtype=inference_dtype)
-#         self.sd_pipeline.unet.to(self.accelerator.device, dtype=inference_dtype)
-        self.sd_pipeline.ref_unet, self.sd_pipeline.sd_pipeline.vae, self.sd_pipeline.sd_pipeline.text_encoder, self.sd_pipeline.sd_pipeline.unet = self.accelerator.prepare(self.sd_pipeline.ref_unet, self.sd_pipeline.sd_pipeline.vae, self.sd_pipeline.sd_pipeline.text_encoder, self.sd_pipeline.sd_pipeline.unet)
+        self.sd_pipeline.ref_unet.to(self.accelerator.device, dtype=inference_dtype)
+        self.sd_pipeline.vae.to(self.accelerator.device, dtype=inference_dtype)
+        self.sd_pipeline.text_encoder.to(self.accelerator.device, dtype=inference_dtype)
+        self.sd_pipeline.unet.to(self.accelerator.device, dtype=inference_dtype)
+#         self.sd_pipeline.ref_unet, self.sd_pipeline.sd_pipeline.vae, self.sd_pipeline.sd_pipeline.text_encoder, self.sd_pipeline.sd_pipeline.unet = self.accelerator.prepare(self.sd_pipeline.ref_unet, self.sd_pipeline.sd_pipeline.vae, self.sd_pipeline.sd_pipeline.text_encoder, self.sd_pipeline.sd_pipeline.unet)
         self.inference_dtype = inference_dtype
+        
     
 
     def step(self, batch: dict, batch_i: int, global_step: int, info: dict):
@@ -241,10 +241,11 @@ class DiffusionDPOTrainer(BaseTrainer):
             # split winning and losing pixel values
             feed_pixel_values = torch.cat(pixel_values.chunk(2, dim=1))
             # encode pixels to latents
-            latents = self.sd_pipeline.vae.encode(
-                feed_pixel_values.to(self.inference_dtype).to(self.accelerator.device)
-            ).latent_dist.sample()
-            latents = latents * self.sd_pipeline.vae.config.scaling_factor
+            with self.accelerator.autocast():
+                latents = self.sd_pipeline.vae.encode(
+                    feed_pixel_values.to(self.inference_dtype).to(self.accelerator.device)
+                ).latent_dist.sample()
+                latents = latents * self.sd_pipeline.vae.config.scaling_factor
 
         # copy noise for image pairs
         noise = torch.randn_like(latents).chunk(2)[0].repeat(2, 1, 1, 1)
@@ -365,27 +366,35 @@ class DiffusionDPOTrainer(BaseTrainer):
             # print('(a)', loss.item())
             
             info["loss"].append(loss)
+            # print("Loss", loss.item(), "learned model error", raw_model_loss.item(), "reference model error", raw_ref_loss.item())
             info["raw_model_loss"].append(raw_model_loss)
             info["raw_ref_loss"].append(raw_ref_loss)
             info["implicit_acc"].append(implicit_acc)
 
-            orig_loss = loss.item()
             self.accelerator.backward(loss)
-            # loss.backward()
-            # print('(b)', loss.item())
             
-            new_loss = loss.item()
-            if orig_loss != new_loss:
-                print("(B) loss not equal expected. Before: ", orig_loss, "After: ", new_loss)
-                sys.exit()
             
             if self.accelerator.sync_gradients and not self.config.train_use_adafactor:
                 self.accelerator.clip_grad_norm_(
                     self.trainable_layers.parameters(),
                     self.config.train_max_grad_norm,
                 )
+            print("not stepping optimizer. Nothing should be changing")
+            # self.optimizer.step()
+            are_equal = True
+            sd = self.sd_pipeline.unet.state_dict()
+            for k,p_ref in self.sd_pipeline.ref_unet.state_dict().items():
+                p_theta = sd[k]
+                if not torch.eq(p_ref, p_theta).all():
+                    are_equal = False
+                    print("mismatch @ ", k)
+            if not are_equal: print("dicts don't match")
 
-            self.optimizer.step()
+#             ref_keys = self.sd_pipeline.ref_unet.state_dict().keys()
+#             learned_keys = self.sd_pipeline.unet.state_dict().keys()
+#             print("Different keys", set(ref_keys).symmetric_difference(set(learned_keys)))
+                    
+            
             self.lr_scheduler.step()
             self.optimizer.zero_grad()
         # Checks if the accelerator has performed an optimization step behind the scenes
@@ -400,11 +409,10 @@ class DiffusionDPOTrainer(BaseTrainer):
             if self.accelerator.is_main_process:
                 self.accelerator.log(info, step=global_step)
                 print(f"Global Step: {global_step}")
-                print(self.config.beta_dpo, self.optimizer)
                 print({k:v.item() for k,v in info.items()})
             global_step += 1
             info = defaultdict(list)
-            sys.exit()
+            # sys.exit()
 
         return global_step, info
 
@@ -415,6 +423,7 @@ class DiffusionDPOTrainer(BaseTrainer):
         global_step = 0
         info = defaultdict(list)
         for batch_i, batch in enumerate(self.dataloader):
+            print(batch_i)
             global_step, info = self.step(batch, batch_i, global_step, info)
 
     def _save_pretrained(self, save_directory):
