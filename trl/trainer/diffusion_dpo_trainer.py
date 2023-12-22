@@ -291,7 +291,6 @@ class DiffusionDPOTrainer(BaseTrainer):
         implicit_acc = (inside_term > 0).sum().float() / inside_term.size(0)
         implicit_acc += 0.5 * (inside_term == 0).sum().float() / inside_term.size(0)
 
-        print("Not returning real loss")
         loss = -1 * F.logsigmoid(inside_term).mean()  # loss should already be mean-reduced
         
         # print(inside_term.item(), loss.item())
