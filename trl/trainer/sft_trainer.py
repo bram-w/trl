@@ -40,8 +40,8 @@ from ..import_utils import is_peft_available
 from .utils import (
     ConstantLengthDataset,
     DataCollatorForCompletionOnlyLM,
-    PeftSavingCallback,
     neftune_post_forward_hook,
+    peft_module_casting_to_bf16,
 )
 
 
@@ -111,6 +111,8 @@ class SFTTrainer(Trainer):
             fine-tuning. Check out the original paper here: https://arxiv.org/abs/2310.05914 and the original code here: https://github.com/neelsjain/NEFTune
         model_init_kwargs: (`Optional[Dict]`, *optional*):
             Dict of Optional kwargs to pass when instantiating the model from a string
+        dataset_kwargs: (`Optional[Dict]`, *optional*):
+            Dict of Optional kwargs to pass when creating packed or non-packed datasets
     """
 
     def __init__(
@@ -138,6 +140,7 @@ class SFTTrainer(Trainer):
         dataset_batch_size: int = 1000,
         neftune_noise_alpha: Optional[float] = None,
         model_init_kwargs: Optional[Dict] = None,
+        dataset_kwargs: Optional[Dict] = None,
     ):
         if model_init_kwargs is None:
             model_init_kwargs = {}
@@ -169,27 +172,28 @@ class SFTTrainer(Trainer):
                 )
 
             if not isinstance(model, PeftModel):
+                _support_gc_kwargs = hasattr(
+                    args, "gradient_checkpointing_kwargs"
+                ) and "gradient_checkpointing_kwargs" in list(
+                    inspect.signature(prepare_model_for_kbit_training).parameters
+                )
+                gradient_checkpointing_kwargs = getattr(args, "gradient_checkpointing_kwargs", None) or {}
                 if getattr(model, "is_loaded_in_8bit", False) or getattr(model, "is_loaded_in_4bit", False):
-                    _support_gc_kwargs = hasattr(
-                        args, "gradient_checkpointing_kwargs"
-                    ) and "gradient_checkpointing_kwargs" in list(
-                        inspect.signature(prepare_model_for_kbit_training).parameters
-                    )
-
                     preprare_model_kwargs = {
                         "use_gradient_checkpointing": getattr(args, "gradient_checkpointing", False)
                     }
 
                     if _support_gc_kwargs:
-                        preprare_model_kwargs["gradient_checkpointing_kwargs"] = getattr(
-                            args, "gradient_checkpointing_kwargs", None
-                        )
+                        preprare_model_kwargs["gradient_checkpointing_kwargs"] = gradient_checkpointing_kwargs
 
                     model = prepare_model_for_kbit_training(model, **preprare_model_kwargs)
 
                     if args is not None:
                         args = dataclasses.replace(args, gradient_checkpointing=False)
-                elif getattr(args, "gradient_checkpointing", False):
+                elif getattr(args, "gradient_checkpointing", False) and (
+                    "use_reentrant" not in gradient_checkpointing_kwargs
+                    or gradient_checkpointing_kwargs["use_reentrant"]
+                ):
                     # For backward compatibility with older versions of transformers
                     if hasattr(model, "enable_input_require_grads"):
                         model.enable_input_require_grads()
@@ -201,9 +205,8 @@ class SFTTrainer(Trainer):
                         model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
 
                 model = get_peft_model(model, peft_config)
-
-            if callbacks is None:
-                callbacks = [PeftSavingCallback]
+                if args.bf16 and getattr(model, "is_loaded_in_4bit", False):
+                    peft_module_casting_to_bf16(model)
 
         if tokenizer is None:
             tokenizer = AutoTokenizer.from_pretrained(model.config._name_or_path)
@@ -241,6 +244,8 @@ class SFTTrainer(Trainer):
             if data_collator is None:
                 data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
 
+        if dataset_kwargs is None:
+            dataset_kwargs = {}
         if train_dataset is not None:
             train_dataset = self._prepare_dataset(
                 train_dataset,
@@ -251,6 +256,7 @@ class SFTTrainer(Trainer):
                 formatting_func,
                 num_of_sequences,
                 chars_per_token,
+                **dataset_kwargs,
             )
         if eval_dataset is not None:
             _multiple = isinstance(eval_dataset, dict)
@@ -265,6 +271,7 @@ class SFTTrainer(Trainer):
                     formatting_func,
                     num_of_sequences,
                     chars_per_token,
+                    **dataset_kwargs,
                 )
             if not _multiple:
                 eval_dataset = _eval_datasets["singleton"]
@@ -329,6 +336,8 @@ class SFTTrainer(Trainer):
         formatting_func,
         num_of_sequences,
         chars_per_token,
+        append_concat_token=True,
+        add_special_tokens=True,
     ):
         if dataset is None:
             raise ValueError("The dataset should not be None")
@@ -339,7 +348,7 @@ class SFTTrainer(Trainer):
 
         if not packing:
             return self._prepare_non_packed_dataloader(
-                tokenizer, dataset, dataset_text_field, max_seq_length, formatting_func
+                tokenizer, dataset, dataset_text_field, max_seq_length, formatting_func, add_special_tokens
             )
 
         else:
@@ -351,10 +360,12 @@ class SFTTrainer(Trainer):
                 num_of_sequences,
                 chars_per_token,
                 formatting_func,
+                append_concat_token,
+                add_special_tokens,
             )
 
     def _prepare_non_packed_dataloader(
-        self, tokenizer, dataset, dataset_text_field, max_seq_length, formatting_func=None
+        self, tokenizer, dataset, dataset_text_field, max_seq_length, formatting_func=None, add_special_tokens=True
     ):
         use_formatting_func = formatting_func is not None and dataset_text_field is None
         self._dataset_sanity_checked = False
@@ -363,6 +374,7 @@ class SFTTrainer(Trainer):
         def tokenize(element):
             outputs = tokenizer(
                 element[dataset_text_field] if not use_formatting_func else formatting_func(element),
+                add_special_tokens=add_special_tokens,
                 truncation=True,
                 padding=False,
                 max_length=max_seq_length,
@@ -399,6 +411,8 @@ class SFTTrainer(Trainer):
         num_of_sequences,
         chars_per_token,
         formatting_func=None,
+        append_concat_token=True,
+        add_special_tokens=True,
     ):
         if dataset_text_field is not None or formatting_func is not None:
             if tokenizer is None:
@@ -414,6 +428,8 @@ class SFTTrainer(Trainer):
                 num_of_sequences=num_of_sequences,
                 chars_per_token=chars_per_token,
                 eos_token_id=tokenizer.eos_token_id,
+                append_concat_token=append_concat_token,
+                add_special_tokens=add_special_tokens,
             )
 
             def data_generator(constant_length_iterator):
