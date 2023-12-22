@@ -654,7 +654,10 @@ class DefaultDiffusionDPOStableDiffusionPipeline(DefaultDDPOStableDiffusionPipel
                 create_ref=True
         )
 
-        self.ref_unet = UNet2DConditionModel.from_pretrained(
-            pretrained_model_name, revision=pretrained_model_revision, subfolder="unet"
-        )
+        self.ref_unet = StableDiffusionPipeline.from_pretrained(
+            pretrained_model_name, revision=pretrained_model_revision
+        ).unet
+        
         self.ref_unet.requires_grad_(False)
+        
+
