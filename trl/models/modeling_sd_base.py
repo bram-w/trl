@@ -649,15 +649,18 @@ import copy
 
 class DefaultDiffusionDPOStableDiffusionPipeline(DefaultDDPOStableDiffusionPipeline):
     def __init__(self, pretrained_model_name: str, *, pretrained_model_revision: str = "main", use_lora: bool = False):
-        DefaultDDPOStableDiffusionPipeline.__init__(
-            self, pretrained_model_name, pretrained_model_revision=pretrained_model_revision, use_lora=use_lora,
-                create_ref=True
-        )
-
+        
+        
         self.ref_unet = StableDiffusionPipeline.from_pretrained(
             pretrained_model_name, revision=pretrained_model_revision
         ).unet
         
         self.ref_unet.requires_grad_(False)
+        
+        DefaultDDPOStableDiffusionPipeline.__init__(
+            self, pretrained_model_name, pretrained_model_revision=pretrained_model_revision, use_lora=use_lora,
+                create_ref=True
+        )
+
         
 

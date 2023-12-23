@@ -61,7 +61,7 @@ class DiffusionDPOConfig:
     """Whether to use the 8bit Adam optimizer from bitsandbytes."""
     train_use_adafactor: bool = False
     """Whether to use the Adafactor for training (saves memory)"""
-    train_learning_rate: float = 2.5e-5
+    train_learning_rate: float = 2.5e-7
     """Learning rate."""
     train_adam_beta1: float = 0.9
     """Adam beta1."""
@@ -71,7 +71,7 @@ class DiffusionDPOConfig:
     """Adam weight decay."""
     train_adam_epsilon: float = 1e-8
     """Adam epsilon."""
-    train_gradient_accumulation_steps: int = 128  # 128 in orig paper
+    train_gradient_accumulation_steps: int = 16  # 128 in orig paper
     """Number of gradient accumulation steps."""
     train_max_grad_norm: float = 1.0
     """Maximum gradient norm for gradient clipping."""
