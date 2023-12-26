@@ -104,7 +104,6 @@ class DiffusionDPOConfig:
     """Learning rate scheduler"""
     lr_warmup_steps: int = 500
     """Num LR warm-up steps"""
-    
 
     def to_dict(self):
         output_dict = {}

@@ -524,12 +524,18 @@ def pipeline_step(
 
 
 class DefaultDDPOStableDiffusionPipeline(DDPOStableDiffusionPipeline):
-    def __init__(self, pretrained_model_name: str, *, pretrained_model_revision: str = "main", use_lora: bool = True,
-                create_ref=False):
+    def __init__(
+        self,
+        pretrained_model_name: str,
+        *,
+        pretrained_model_revision: str = "main",
+        use_lora: bool = True,
+        create_ref=False,
+    ):
         self.sd_pipeline = StableDiffusionPipeline.from_pretrained(
             pretrained_model_name, revision=pretrained_model_revision
         )
-        
+
         self.use_lora = use_lora
         self.pretrained_model = pretrained_model_name
         self.pretrained_revision = pretrained_model_revision
@@ -645,22 +651,20 @@ class DefaultDDPOStableDiffusionPipeline(DDPOStableDiffusionPipeline):
         else:
             raise ValueError(f"Unknown model type {type(models[0])}")
 
-import copy
 
 class DefaultDiffusionDPOStableDiffusionPipeline(DefaultDDPOStableDiffusionPipeline):
     def __init__(self, pretrained_model_name: str, *, pretrained_model_revision: str = "main", use_lora: bool = False):
-        
-        
+
         self.ref_unet = StableDiffusionPipeline.from_pretrained(
             pretrained_model_name, revision=pretrained_model_revision
         ).unet
-        
+
         self.ref_unet.requires_grad_(False)
-        
+
         DefaultDDPOStableDiffusionPipeline.__init__(
-            self, pretrained_model_name, pretrained_model_revision=pretrained_model_revision, use_lora=use_lora,
-                create_ref=True
+            self,
+            pretrained_model_name,
+            pretrained_model_revision=pretrained_model_revision,
+            use_lora=use_lora,
+            create_ref=True,
         )
-
-        
-

@@ -34,7 +34,8 @@ class ScriptArguments:
     diffusion_dpo_config: DiffusionDPOConfig = field(
         default_factory=lambda: DiffusionDPOConfig(
             tracker_project_name="stable_diffusion_training",
-            beta_dpo=5000, train_adam_weight_decay=0,
+            beta_dpo=5000,
+            train_adam_weight_decay=0,
             dataset_cache_dir="/export/share/datasets/vision_language/pick_a_pic_v2/",
             log_with="tensorboard",
             project_kwargs={
